@@ -6,18 +6,14 @@
 #include "crypto_aead.h"
 
 int main() {
-    // Inputs
     uint8_t key[CRYPTO_KEYBYTES] = {0};
     uint8_t nonce[CRYPTO_NPUBBYTES] = {0};
-    uint8_t msg[] = "Hello, Ascon on MacBook!";
-    uint8_t ad[] = "MacBook";
-
-    // Buffers
+    uint8_t msg[] = "Hello, Ascon NEON!";
+    uint8_t ad[] = "NEON-Test";
     uint8_t ct[128] = {0};
     uint8_t decrypted[128] = {0};
     unsigned long long clen = 0, mlen = 0;
 
-    // Initialize cycle counter
     cpucycles_init();
 
     // --- ENCRYPTION ---
@@ -27,9 +23,6 @@ int main() {
     cpucycles_stop();
 
     printf("Encryption cycles: %llu\n", cpucycles_result());
-    printf("Ciphertext: ");
-    for (size_t i = 0; i < clen; ++i) printf("%02x", ct[i]);
-    printf("\n");
 
     // --- DECRYPTION ---
     cpucycles_reset();
@@ -38,11 +31,12 @@ int main() {
     cpucycles_stop();
 
     printf("Decryption cycles: %llu\n", cpucycles_result());
+
     if (result != 0) {
         printf("Decryption failed!\n");
         return 1;
     }
 
-    printf("Decrypted message: %s\n", decrypted);
+    printf("Decrypted: %s\n", decrypted);
     return 0;
 }
