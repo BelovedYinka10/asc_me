@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 199309L  // Enable POSIX.1b features for clock_gettime
+
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
@@ -6,7 +8,7 @@
 #include "api.h"            // For CRYPTO_* constants
 #include "crypto_aead.h"    // For crypto_aead_encrypt/decrypt
 
-// Helper to compute elapsed milliseconds between two timespecs
+// Helper function to compute elapsed milliseconds
 double elapsed_ms(struct timespec start, struct timespec end) {
     double sec = end.tv_sec - start.tv_sec;
     double nsec = end.tv_nsec - start.tv_nsec;
@@ -50,6 +52,3 @@ int main() {
 
     return 0;
 }
-
-
-
