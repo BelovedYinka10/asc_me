@@ -6,8 +6,8 @@
 #include <time.h>
 #include <stdlib.h>
 
-#include "api.h"            // For CRYPTO_* constants
-#include "crypto_aead.h"    // For crypto_aead_encrypt/decrypt
+#include "api.h"
+#include "crypto_aead.h"
 
 // Helper to compute elapsed milliseconds
 double elapsed_ms(struct timespec start, struct timespec end) {
@@ -27,7 +27,7 @@ size_t getCurrentRSS() {
         if (strncmp(line, "VmRSS:", 6) == 0) {
             char* p = line + 6;
             while (*p == ' ' || *p == '\t') p++;
-            rss = strtoul(p, NULL, 10);  // in KB
+            rss = strtoul(p, NULL, 10);
             break;
         }
     }
@@ -38,13 +38,28 @@ size_t getCurrentRSS() {
 int main() {
     uint8_t key[CRYPTO_KEYBYTES] = {0};
     uint8_t nonce[CRYPTO_NPUBBYTES] = {0};
-    uint8_t msg[] = "Hello, Ascon on MacBook!";
     uint8_t ad[] = "MacBook";
 
-    uint8_t ct[128] = {0};
-    uint8_t decrypted[128] = {0};
-    unsigned long long clen = 0, mlen = 0;
+    // Allocate 800 KB message and fill with random data
+    size_t msg_len = 800 * 1024;
+    uint8_t *msg = malloc(msg_len);
+    if (!msg) {
+        fprintf(stderr, "Memory allocation failed\n");
+        return 1;
+    }
+    for (size_t i = 0; i < msg_len; i++) {
+        msg[i] = (uint8_t)(i % 256);
+    }
 
+    uint8_t *ct = malloc(msg_len + CRYPTO_ABYTES);
+    uint8_t *decrypted = malloc(msg_len + CRYPTO_ABYTES);
+    if (!ct || !decrypted) {
+        fprintf(stderr, "Memory allocation failed\n");
+        free(msg);
+        return 1;
+    }
+
+    unsigned long long clen = 0, mlen = 0;
     struct timespec start, end;
     size_t mem_before, mem_after;
 
@@ -52,18 +67,14 @@ int main() {
     mem_before = getCurrentRSS();
     clock_gettime(CLOCK_MONOTONIC, &start);
 
-    crypto_aead_encrypt(ct, &clen, msg, sizeof(msg), ad, sizeof(ad), NULL, nonce, key);
+    crypto_aead_encrypt(ct, &clen, msg, msg_len, ad, sizeof(ad), NULL, nonce, key);
 
     clock_gettime(CLOCK_MONOTONIC, &end);
     mem_after = getCurrentRSS();
 
     printf("Encryption time: %.3f ms\n", elapsed_ms(start, end));
     printf("Memory used during encryption: %zu KB\n", mem_after - mem_before);
-    printf("Ciphertext: ");
-    for (size_t i = 0; i < clen; ++i) {
-        printf("%02x", ct[i]);
-    }
-    printf("\n");
+    printf("Ciphertext length: %llu bytes\n", clen);
 
     // --- DECRYPTION ---
     mem_before = getCurrentRSS();
@@ -71,6 +82,9 @@ int main() {
 
     if (crypto_aead_decrypt(decrypted, &mlen, NULL, ct, clen, ad, sizeof(ad), nonce, key) != 0) {
         printf("Decryption failed!\n");
+        free(msg);
+        free(ct);
+        free(decrypted);
         return 1;
     }
 
@@ -79,7 +93,12 @@ int main() {
 
     printf("Decryption time: %.3f ms\n", elapsed_ms(start, end));
     printf("Memory used during decryption: %zu KB\n", mem_after - mem_before);
-    printf("Decrypted message: %s\n", decrypted);
+    printf("Decrypted message length: %llu bytes\n", mlen);
+
+    // Cleanup
+    free(msg);
+    free(ct);
+    free(decrypted);
 
     return 0;
 }
