@@ -1,11 +1,11 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
-#include <time.h>
+#include <time.h>  // <-- REQUIRED for struct timespec and clock_gettime
+
 #include "api.h"
 #include "crypto_aead.h"
 
-// Time measurement
 double elapsed_ms(struct timespec start, struct timespec end) {
     return (end.tv_sec - start.tv_sec) * 1000.0 +
            (end.tv_nsec - start.tv_nsec) / 1e6;
