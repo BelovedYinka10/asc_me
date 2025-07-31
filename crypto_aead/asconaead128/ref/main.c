@@ -8,19 +8,20 @@
 // Function to enable the ARM cycle counter (PMCCNTR)
 static inline void enable_cycle_counter() {
     // Enable user-mode access to the cycle counter
-    asm volatile("mcr p15, 0, %0, c9, c14, 0" :: "r"(0x00000001));
+    __asm__ volatile("mcr p15, 0, %0, c9, c14, 0" :: "r"(0x00000001));
     // Enable the cycle counter
-    asm volatile("mcr p15, 0, %0, c9, c12, 0" :: "r"(0x8000000f));
+    __asm__ volatile("mcr p15, 0, %0, c9, c12, 0" :: "r"(0x8000000f));
     // Clear overflow flag
-    asm volatile("mcr p15, 0, %0, c9, c12, 1" :: "r"(0x8000000f));
+    __asm__ volatile("mcr p15, 0, %0, c9, c12, 1" :: "r"(0x8000000f));
 }
 
 // Function to read the ARM cycle counter
 static inline uint32_t read_cycle_counter() {
     uint32_t cycles;
-    asm volatile("mrc p15, 0, %0, c9, c13, 0" : "=r"(cycles));
+    __asm__ volatile("mrc p15, 0, %0, c9, c13, 0" : "=r"(cycles));
     return cycles;
 }
+
 
 int main() {
     uint8_t key[CRYPTO_KEYBYTES] = {0};
