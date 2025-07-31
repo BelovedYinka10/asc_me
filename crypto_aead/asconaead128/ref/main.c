@@ -15,7 +15,10 @@ static long perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
     return syscall(__NR_perf_event_open, hw_event, pid, cpu, group_fd, flags);
 }
 
-uint64_t measure_cycles(void (*func)(void*), void *arg) {
+uint64_t measure_encrypt(uint8_t *ct, unsigned long long *clen,
+                         uint8_t *msg, size_t msg_len,
+                         uint8_t *ad, size_t ad_len,
+                         uint8_t *nonce, uint8_t *key) {
     struct perf_event_attr pe;
     memset(&pe, 0, sizeof(struct perf_event_attr));
     pe.type = PERF_TYPE_HARDWARE;
@@ -34,7 +37,7 @@ uint64_t measure_cycles(void (*func)(void*), void *arg) {
     ioctl(fd, PERF_EVENT_IOC_RESET, 0);
     ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
 
-    func(arg);  // measure this
+    crypto_aead_encrypt(ct, clen, msg, msg_len, ad, ad_len, NULL, nonce, key);
 
     ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
 
@@ -49,42 +52,41 @@ uint64_t measure_cycles(void (*func)(void*), void *arg) {
     return count;
 }
 
-struct enc_args {
-    uint8_t *ct;
-    unsigned long long *clen;
-    uint8_t *msg;
-    size_t msg_len;
-    uint8_t *ad;
-    size_t ad_len;
-    uint8_t *nonce;
-    uint8_t *key;
-};
+uint64_t measure_decrypt(uint8_t *pt, unsigned long long *mlen,
+                         uint8_t *ct, unsigned long long clen,
+                         uint8_t *ad, size_t ad_len,
+                         uint8_t *nonce, uint8_t *key) {
+    struct perf_event_attr pe;
+    memset(&pe, 0, sizeof(struct perf_event_attr));
+    pe.type = PERF_TYPE_HARDWARE;
+    pe.size = sizeof(struct perf_event_attr);
+    pe.config = PERF_COUNT_HW_CPU_CYCLES;
+    pe.disabled = 1;
+    pe.exclude_kernel = 1;
+    pe.exclude_hv = 1;
 
-struct dec_args {
-    uint8_t *decrypted;
-    unsigned long long *mlen;
-    uint8_t *ct;
-    unsigned long long clen;
-    uint8_t *ad;
-    size_t ad_len;
-    uint8_t *nonce;
-    uint8_t *key;
-};
+    int fd = perf_event_open(&pe, 0, 0, -1, 0);
+    if (fd == -1) {
+        perror("perf_event_open");
+        exit(1);
+    }
 
-__attribute__((noinline))
-void encrypt_func(void *arg) {
-    printf("[DEBUG] Inside encrypt_func()\n");
-    struct enc_args *args = (struct enc_args *)arg;
-    crypto_aead_encrypt(args->ct, args->clen, args->msg, args->msg_len,
-                        args->ad, args->ad_len, NULL, args->nonce, args->key);
-}
+    ioctl(fd, PERF_EVENT_IOC_RESET, 0);
+    ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
 
-__attribute__((noinline))
-void decrypt_func(void *arg) {
-    printf("[DEBUG] Inside decrypt_func()\n");
-    struct dec_args *args = (struct dec_args *)arg;
-    crypto_aead_decrypt(args->decrypted, args->mlen, NULL, args->ct, args->clen,
-                        args->ad, args->ad_len, args->nonce, args->key);
+    crypto_aead_decrypt(pt, mlen, NULL, ct, clen, ad, ad_len, nonce, key);
+
+    ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
+
+    uint64_t count = 0;
+    if (read(fd, &count, sizeof(count)) != sizeof(count)) {
+        perror("read");
+        close(fd);
+        exit(1);
+    }
+
+    close(fd);
+    return count;
 }
 
 int main() {
@@ -106,13 +108,11 @@ int main() {
 
     unsigned long long clen = 0, mlen = 0;
 
-    struct enc_args enc = {ct, &clen, msg, msg_len, ad, sizeof(ad), nonce, key};
-    uint64_t enc_cycles = measure_cycles(encrypt_func, &enc);
+    printf("[DEBUG] Encrypting...\n");
+    uint64_t enc_cycles = measure_encrypt(ct, &clen, msg, msg_len, ad, sizeof(ad), nonce, key);
 
-    // Prevent compiler from removing result
     __asm__ volatile("" : : "r"(clen), "r"(ct) : "memory");
 
-    // Add checksum to force use of output
     uint32_t checksum = 0;
     for (size_t i = 0; i < clen; i++) checksum += ct[i];
     printf("Ciphertext checksum: %u\n", checksum);
@@ -120,8 +120,8 @@ int main() {
     printf("Encryption cycles: %lu\n", enc_cycles);
     printf("Ciphertext length: %llu bytes\n", clen);
 
-    struct dec_args dec = {decrypted, &mlen, ct, clen, ad, sizeof(ad), nonce, key};
-    uint64_t dec_cycles = measure_cycles(decrypt_func, &dec);
+    printf("[DEBUG] Decrypting...\n");
+    uint64_t dec_cycles = measure_decrypt(decrypted, &mlen, ct, clen, ad, sizeof(ad), nonce, key);
 
     __asm__ volatile("" : : "r"(mlen), "r"(decrypted) : "memory");
 
