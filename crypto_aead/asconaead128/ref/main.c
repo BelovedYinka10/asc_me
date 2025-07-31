@@ -8,6 +8,7 @@
 #include <linux/perf_event.h>
 #include <asm/unistd.h>
 #include <errno.h>
+#include <sched.h> // For CPU affinity
 #include "api.h"
 #include "crypto_aead.h"
 
@@ -21,6 +22,15 @@ perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
 }
 
 int main() {
+    // Pin the process to CPU 0 to ensure consistent measurements
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    CPU_SET(0, &mask);
+    if (sched_setaffinity(0, sizeof(mask), &mask) == -1) {
+        perror("sched_setaffinity");
+        // We will continue anyway, but a warning is good
+    }
+
     // Inputs
     uint8_t key[CRYPTO_KEYBYTES] = {0};
     uint8_t nonce[CRYPTO_NPUBBYTES] = {0};
@@ -59,9 +69,18 @@ int main() {
     ioctl(fd, PERF_EVENT_IOC_RESET, 0);
     ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
 
+    // Use volatile to prevent compiler from optimizing the loop away
+    volatile unsigned long long volatile_clen = 0;
     // Loop the encryption NUM_ITERATIONS times
     for (int i = 0; i < NUM_ITERATIONS; ++i) {
-        crypto_aead_encrypt(ct, &clen, msg, msg_len, ad, sizeof(ad), NULL, nonce, key);
+        crypto_aead_encrypt(ct, (unsigned long long*)&volatile_clen, msg, msg_len, ad, sizeof(ad), NULL, nonce, key);
+        // This check forces the compiler to acknowledge the result of each call
+        if (volatile_clen == 0) {
+            // This is unlikely to happen, but it prevents the compiler from assuming
+            // a single execution is enough.
+            fprintf(stderr, "Encryption failed on iteration %d\n", i);
+            break;
+        }
     }
 
     ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
@@ -74,6 +93,9 @@ int main() {
         return 1;
     }
     close(fd);
+
+    // Store the last clen value for decryption and checksum
+    clen = volatile_clen;
 
     uint64_t avg_enc_cycles = total_enc_cycles / NUM_ITERATIONS;
 
@@ -99,9 +121,15 @@ int main() {
     ioctl(fd, PERF_EVENT_IOC_RESET, 0);
     ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
 
-    // Loop the decryption NUM_ITERATIONS times
+    // Use volatile to prevent compiler from optimizing the loop away
+    volatile unsigned long long volatile_mlen = 0;
     for (int i = 0; i < NUM_ITERATIONS; ++i) {
-        crypto_aead_decrypt(decrypted, &mlen, NULL, ct, clen, ad, sizeof(ad), nonce, key);
+        crypto_aead_decrypt(decrypted, (unsigned long long*)&volatile_mlen, NULL, ct, clen, ad, sizeof(ad), nonce, key);
+        // This check forces the compiler to acknowledge the result of each call
+        if (volatile_mlen == 0) {
+            fprintf(stderr, "Decryption failed on iteration %d\n", i);
+            break;
+        }
     }
 
     ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
@@ -114,6 +142,9 @@ int main() {
         return 1;
     }
     close(fd);
+
+    // Store the last mlen value
+    mlen = volatile_mlen;
 
     uint64_t avg_dec_cycles = total_dec_cycles / NUM_ITERATIONS;
 
