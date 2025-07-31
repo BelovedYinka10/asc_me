@@ -39,6 +39,7 @@ int main() {
     uint8_t key[CRYPTO_KEYBYTES] = {0};
     uint8_t nonce[CRYPTO_NPUBBYTES] = {0};
     uint8_t ad[] = "MacBook";
+    printf("hi me")
 
     // Allocate 800 KB message and fill with random data
     size_t msg_len = 800 * 1024;
