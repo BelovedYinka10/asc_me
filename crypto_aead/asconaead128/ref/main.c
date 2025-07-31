@@ -8,12 +8,12 @@
 #include <linux/perf_event.h>
 #include <asm/unistd.h>
 #include <errno.h>
-#include <sched.h> // For CPU affinity
+#include <sched.h>
 #include "api.h"
 #include "crypto_aead.h"
 
 // Define a constant for the number of loop iterations
-#define NUM_ITERATIONS 1000
+#define NUM_ITERATIONS 1000.0 // Use a floating-point literal
 
 static long
 perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
@@ -28,7 +28,6 @@ int main() {
     CPU_SET(0, &mask);
     if (sched_setaffinity(0, sizeof(mask), &mask) == -1) {
         perror("sched_setaffinity");
-        // We will continue anyway, but a warning is good
     }
 
     // Inputs
@@ -69,15 +68,10 @@ int main() {
     ioctl(fd, PERF_EVENT_IOC_RESET, 0);
     ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
 
-    // Use volatile to prevent compiler from optimizing the loop away
     volatile unsigned long long volatile_clen = 0;
-    // Loop the encryption NUM_ITERATIONS times
-    for (int i = 0; i < NUM_ITERATIONS; ++i) {
+    for (int i = 0; i < (int)NUM_ITERATIONS; ++i) { // Cast NUM_ITERATIONS back to int for the loop
         crypto_aead_encrypt(ct, (unsigned long long*)&volatile_clen, msg, msg_len, ad, sizeof(ad), NULL, nonce, key);
-        // This check forces the compiler to acknowledge the result of each call
         if (volatile_clen == 0) {
-            // This is unlikely to happen, but it prevents the compiler from assuming
-            // a single execution is enough.
             fprintf(stderr, "Encryption failed on iteration %d\n", i);
             break;
         }
@@ -94,23 +88,21 @@ int main() {
     }
     close(fd);
 
-    // Store the last clen value for decryption and checksum
     clen = volatile_clen;
+    double avg_enc_cycles = (double)total_enc_cycles / NUM_ITERATIONS;
 
-    uint64_t avg_enc_cycles = total_enc_cycles / NUM_ITERATIONS;
-
-    // Prevent optimization
     __asm__ volatile("" : : "r"(clen), "r"(ct) : "memory");
 
     uint32_t ct_checksum = 0;
     for (size_t i = 0; i < clen; i++) ct_checksum += ct[i];
 
     printf("Ciphertext checksum: %u\n", ct_checksum);
-    printf("Total Encryption cycles for %d iterations: %lu\n", NUM_ITERATIONS, total_enc_cycles);
-    printf("Average Encryption cycles per operation: %lu\n", avg_enc_cycles);
+    printf("Total Encryption cycles for %d iterations: %lu\n", (int)NUM_ITERATIONS, total_enc_cycles);
+    printf("Average Encryption cycles per operation: %.3f\n", avg_enc_cycles); // Print with 3 decimal places
     printf("Ciphertext length: %llu bytes\n", clen);
 
     // === DECRYPTION Measurement ===
+    // ... (rest of your code, apply the same changes)
     fd = perf_event_open(&pe, 0, 0, -1, 0);
     if (fd == -1) {
         perror("perf_event_open (decrypt)");
@@ -121,11 +113,9 @@ int main() {
     ioctl(fd, PERF_EVENT_IOC_RESET, 0);
     ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
 
-    // Use volatile to prevent compiler from optimizing the loop away
     volatile unsigned long long volatile_mlen = 0;
-    for (int i = 0; i < NUM_ITERATIONS; ++i) {
+    for (int i = 0; i < (int)NUM_ITERATIONS; ++i) {
         crypto_aead_decrypt(decrypted, (unsigned long long*)&volatile_mlen, NULL, ct, clen, ad, sizeof(ad), nonce, key);
-        // This check forces the compiler to acknowledge the result of each call
         if (volatile_mlen == 0) {
             fprintf(stderr, "Decryption failed on iteration %d\n", i);
             break;
@@ -143,10 +133,9 @@ int main() {
     }
     close(fd);
 
-    // Store the last mlen value
     mlen = volatile_mlen;
 
-    uint64_t avg_dec_cycles = total_dec_cycles / NUM_ITERATIONS;
+    double avg_dec_cycles = (double)total_dec_cycles / NUM_ITERATIONS;
 
     __asm__ volatile("" : : "r"(mlen), "r"(decrypted) : "memory");
 
@@ -154,8 +143,8 @@ int main() {
     for (size_t i = 0; i < mlen; i++) pt_checksum += decrypted[i];
 
     printf("Decrypted checksum: %u\n", pt_checksum);
-    printf("Total Decryption cycles for %d iterations: %lu\n", NUM_ITERATIONS, total_dec_cycles);
-    printf("Average Decryption cycles per operation: %lu\n", avg_dec_cycles);
+    printf("Total Decryption cycles for %d iterations: %lu\n", (int)NUM_ITERATIONS, total_dec_cycles);
+    printf("Average Decryption cycles per operation: %.3f\n", avg_dec_cycles);
     printf("Decrypted message length: %llu bytes\n", mlen);
 
     free(msg);
