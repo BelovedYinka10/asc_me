@@ -11,12 +11,13 @@
 #include "crypto_aead.h"
 
 static int fddev = -1;
+
 static long perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
                            int cpu, int group_fd, unsigned long flags) {
     return syscall(__NR_perf_event_open, hw_event, pid, cpu, group_fd, flags);
 }
 
-void start_counter() {
+void init_counter() {
     struct perf_event_attr pe;
     memset(&pe, 0, sizeof(pe));
     pe.type = PERF_TYPE_HARDWARE;
@@ -31,8 +32,6 @@ void start_counter() {
         fprintf(stderr, "Error opening perf events\n");
         exit(1);
     }
-    ioctl(fddev, PERF_EVENT_IOC_RESET, 0);
-    ioctl(fddev, PERF_EVENT_IOC_ENABLE, 0);
 }
 
 uint64_t read_counter() {
@@ -44,9 +43,8 @@ uint64_t read_counter() {
     return count;
 }
 
-void stop_counter() {
+void close_counter() {
     if (fddev != -1) {
-        ioctl(fddev, PERF_EVENT_IOC_DISABLE, 0);
         close(fddev);
     }
 }
@@ -77,19 +75,22 @@ int main() {
     unsigned long long clen = 0, mlen = 0;
     uint64_t start_cycles, end_cycles;
 
-    // --- ENCRYPTION ---
-    start_counter();
-    start_cycles = read_counter();
-    crypto_aead_encrypt(ct, &clen, msg, msg_len, ad, sizeof(ad), NULL, nonce, key);
-    end_cycles = read_counter();
-    stop_counter();
+    // Initialize counter once
+    init_counter();
 
-    printf("Encryption cycles: %lu\n", end_cycles - start_cycles);
+    // --- ENCRYPTION ---
+    ioctl(fddev, PERF_EVENT_IOC_RESET, 0);
+    ioctl(fddev, PERF_EVENT_IOC_ENABLE, 0);
+    crypto_aead_encrypt(ct, &clen, msg, msg_len, ad, sizeof(ad), NULL, nonce, key);
+    ioctl(fddev, PERF_EVENT_IOC_DISABLE, 0);
+    end_cycles = read_counter();
+
+    printf("Encryption cycles: %lu\n", end_cycles);
     printf("Ciphertext length: %llu bytes\n", clen);
 
     // --- DECRYPTION ---
-    start_counter();
-    start_cycles = read_counter();
+    ioctl(fddev, PERF_EVENT_IOC_RESET, 0);
+    ioctl(fddev, PERF_EVENT_IOC_ENABLE, 0);
     if (crypto_aead_decrypt(decrypted, &mlen, NULL, ct, clen, ad, sizeof(ad), nonce, key) != 0) {
         printf("Decryption failed!\n");
         free(msg);
@@ -97,12 +98,13 @@ int main() {
         free(decrypted);
         return 1;
     }
+    ioctl(fddev, PERF_EVENT_IOC_DISABLE, 0);
     end_cycles = read_counter();
-    stop_counter();
 
-    printf("Decryption cycles: %lu\n", end_cycles - start_cycles);
+    printf("Decryption cycles: %lu\n", end_cycles);
     printf("Decrypted message length: %llu bytes\n", mlen);
 
+    close_counter();
     free(msg);
     free(ct);
     free(decrypted);
