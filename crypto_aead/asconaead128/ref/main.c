@@ -34,7 +34,7 @@ uint64_t measure_cycles(void (*func)(void*), void *arg) {
     ioctl(fd, PERF_EVENT_IOC_RESET, 0);
     ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
 
-    func(arg);  // execute measured function
+    func(arg);  // measure this
 
     ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
 
@@ -73,6 +73,7 @@ struct dec_args {
 
 __attribute__((noinline))
 void encrypt_func(void *arg) {
+    printf("[DEBUG] Inside encrypt_func()\n");
     struct enc_args *args = (struct enc_args *)arg;
     crypto_aead_encrypt(args->ct, args->clen, args->msg, args->msg_len,
                         args->ad, args->ad_len, NULL, args->nonce, args->key);
@@ -80,6 +81,7 @@ void encrypt_func(void *arg) {
 
 __attribute__((noinline))
 void decrypt_func(void *arg) {
+    printf("[DEBUG] Inside decrypt_func()\n");
     struct dec_args *args = (struct dec_args *)arg;
     crypto_aead_decrypt(args->decrypted, args->mlen, NULL, args->ct, args->clen,
                         args->ad, args->ad_len, args->nonce, args->key);
@@ -107,8 +109,13 @@ int main() {
     struct enc_args enc = {ct, &clen, msg, msg_len, ad, sizeof(ad), nonce, key};
     uint64_t enc_cycles = measure_cycles(encrypt_func, &enc);
 
-    // Prevent optimization from removing output
+    // Prevent compiler from removing result
     __asm__ volatile("" : : "r"(clen), "r"(ct) : "memory");
+
+    // Add checksum to force use of output
+    uint32_t checksum = 0;
+    for (size_t i = 0; i < clen; i++) checksum += ct[i];
+    printf("Ciphertext checksum: %u\n", checksum);
 
     printf("Encryption cycles: %lu\n", enc_cycles);
     printf("Ciphertext length: %llu bytes\n", clen);
@@ -117,6 +124,10 @@ int main() {
     uint64_t dec_cycles = measure_cycles(decrypt_func, &dec);
 
     __asm__ volatile("" : : "r"(mlen), "r"(decrypted) : "memory");
+
+    checksum = 0;
+    for (size_t i = 0; i < mlen; i++) checksum += decrypted[i];
+    printf("Decrypted checksum: %u\n", checksum);
 
     printf("Decryption cycles: %lu\n", dec_cycles);
     printf("Decrypted message length: %llu bytes\n", mlen);
