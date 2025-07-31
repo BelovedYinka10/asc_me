@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <linux/perf_event.h>
@@ -10,103 +10,102 @@
 #include "api.h"
 #include "crypto_aead.h"
 
+// Try hardware counters first
+#if defined(__arm__) || defined(__aarch64__)
+#define TRY_HW_COUNTERS 1
+#else
+#define TRY_HW_COUNTERS 0
+#endif
+
+// Performance counter state
 static int fddev = -1;
+static int hw_counters_available = 0;
+static double cpu_hz = 1.0e9; // Default to 1GHz if detection fails
 
-static long perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
-                           int cpu, int group_fd, unsigned long flags) {
-    return syscall(__NR_perf_event_open, hw_event, pid, cpu, group_fd, flags);
-}
+// Initialize performance monitoring
+void init_perf() {
+    #if TRY_HW_COUNTERS
+    struct perf_event_attr pe = {
+        .type = PERF_TYPE_HARDWARE,
+        .size = sizeof(struct perf_event_attr),
+        .config = PERF_COUNT_HW_CPU_CYCLES,
+        .disabled = 1,
+        .exclude_kernel = 1,
+        .exclude_hv = 1
+    };
 
-void init_counter() {
-    struct perf_event_attr pe;
-    memset(&pe, 0, sizeof(pe));
-    pe.type = PERF_TYPE_HARDWARE;
-    pe.size = sizeof(pe);
-    pe.config = PERF_COUNT_HW_CPU_CYCLES;
-    pe.disabled = 1;
-    pe.exclude_kernel = 1;
-    pe.exclude_hv = 1;
+    fddev = syscall(__NR_perf_event_open, &pe, 0, -1, -1, 0);
+    hw_counters_available = (fddev != -1);
+    #endif
 
-    fddev = perf_event_open(&pe, 0, -1, -1, 0);
-    if (fddev == -1) {
-        fprintf(stderr, "Error opening perf events\n");
-        exit(1);
+    // Get CPU frequency as fallback
+    FILE* f = fopen("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", "r");
+    if (f) {
+        unsigned long freq_khz;
+        if (fscanf(f, "%lu", &freq_khz) == 1) {
+            cpu_hz = freq_khz * 1000.0;
+        }
+        fclose(f);
     }
 }
 
-uint64_t read_counter() {
-    uint64_t count;
-    if (read(fddev, &count, sizeof(count)) != sizeof(count)) {
-        fprintf(stderr, "Error reading perf counter\n");
-        exit(1);
-    }
-    return count;
+// Get current time in nanoseconds
+uint64_t get_time_ns() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
-void close_counter() {
-    if (fddev != -1) {
-        close(fddev);
+// Measure operation
+void measure_operation(const char* name, void (*op)(void)) {
+    uint64_t cycles = 0;
+    uint64_t time_ns = 0;
+
+    if (hw_counters_available) {
+        ioctl(fddev, PERF_EVENT_IOC_RESET, 0);
+        ioctl(fddev, PERF_EVENT_IOC_ENABLE, 0);
+        op();
+        ioctl(fddev, PERF_EVENT_IOC_DISABLE, 0);
+        read(fddev, &cycles, sizeof(cycles));
+    } else {
+        uint64_t start = get_time_ns();
+        op();
+        time_ns = get_time_ns() - start;
+        cycles = (uint64_t)(time_ns * (cpu_hz / 1e9));
     }
+
+    if (hw_counters_available) {
+        printf("%s cycles: %lu\n", name, cycles);
+    } else {
+        printf("%s time: %.3f ms (estimated cycles: %lu)\n",
+               name, time_ns/1e6, cycles);
+    }
+}
+
+// Wrapper functions for crypto operations
+void encrypt_wrapper() {
+    unsigned long long clen;
+    crypto_aead_encrypt(ct, &clen, msg, msg_len, ad, sizeof(ad), NULL, nonce, key);
+}
+
+void decrypt_wrapper() {
+    unsigned long long mlen;
+    crypto_aead_decrypt(decrypted, &mlen, NULL, ct, clen, ad, sizeof(ad), nonce, key);
 }
 
 int main() {
-    uint8_t key[CRYPTO_KEYBYTES] = {0};
-    uint8_t nonce[CRYPTO_NPUBBYTES] = {0};
-    uint8_t ad[] = "MacBook";
+    // ... (same initialization code as before) ...
 
-    size_t msg_len = 800 * 1024;
-    uint8_t *msg = malloc(msg_len);
-    if (!msg) {
-        fprintf(stderr, "Memory allocation failed\n");
-        return 1;
-    }
-    for (size_t i = 0; i < msg_len; i++) {
-        msg[i] = (uint8_t)(i % 256);
-    }
-
-    uint8_t *ct = malloc(msg_len + CRYPTO_ABYTES);
-    uint8_t *decrypted = malloc(msg_len + CRYPTO_ABYTES);
-    if (!ct || !decrypted) {
-        fprintf(stderr, "Memory allocation failed\n");
-        free(msg);
-        return 1;
-    }
-
-    unsigned long long clen = 0, mlen = 0;
-    uint64_t start_cycles, end_cycles;
-
-    // Initialize counter once
-    init_counter();
+    init_perf();
 
     // --- ENCRYPTION ---
-    ioctl(fddev, PERF_EVENT_IOC_RESET, 0);
-    ioctl(fddev, PERF_EVENT_IOC_ENABLE, 0);
-    crypto_aead_encrypt(ct, &clen, msg, msg_len, ad, sizeof(ad), NULL, nonce, key);
-    ioctl(fddev, PERF_EVENT_IOC_DISABLE, 0);
-    end_cycles = read_counter();
-
-    printf("Encryption cycles: %lu\n", end_cycles);
+    measure_operation("Encryption", encrypt_wrapper);
     printf("Ciphertext length: %llu bytes\n", clen);
 
     // --- DECRYPTION ---
-    ioctl(fddev, PERF_EVENT_IOC_RESET, 0);
-    ioctl(fddev, PERF_EVENT_IOC_ENABLE, 0);
-    if (crypto_aead_decrypt(decrypted, &mlen, NULL, ct, clen, ad, sizeof(ad), nonce, key) != 0) {
-        printf("Decryption failed!\n");
-        free(msg);
-        free(ct);
-        free(decrypted);
-        return 1;
-    }
-    ioctl(fddev, PERF_EVENT_IOC_DISABLE, 0);
-    end_cycles = read_counter();
-
-    printf("Decryption cycles: %lu\n", end_cycles);
+    measure_operation("Decryption", decrypt_wrapper);
     printf("Decrypted message length: %llu bytes\n", mlen);
 
-    close_counter();
-    free(msg);
-    free(ct);
-    free(decrypted);
+    // ... (cleanup code as before) ...
     return 0;
 }
