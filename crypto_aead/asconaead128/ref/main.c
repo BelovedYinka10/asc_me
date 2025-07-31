@@ -34,7 +34,7 @@ uint64_t measure_cycles(void (*func)(void*), void *arg) {
     ioctl(fd, PERF_EVENT_IOC_RESET, 0);
     ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
 
-    func(arg);  // <-- measure this
+    func(arg);  // execute measured function
 
     ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
 
@@ -71,12 +71,14 @@ struct dec_args {
     uint8_t *key;
 };
 
+__attribute__((noinline))
 void encrypt_func(void *arg) {
     struct enc_args *args = (struct enc_args *)arg;
     crypto_aead_encrypt(args->ct, args->clen, args->msg, args->msg_len,
                         args->ad, args->ad_len, NULL, args->nonce, args->key);
 }
 
+__attribute__((noinline))
 void decrypt_func(void *arg) {
     struct dec_args *args = (struct dec_args *)arg;
     crypto_aead_decrypt(args->decrypted, args->mlen, NULL, args->ct, args->clen,
@@ -105,11 +107,16 @@ int main() {
     struct enc_args enc = {ct, &clen, msg, msg_len, ad, sizeof(ad), nonce, key};
     uint64_t enc_cycles = measure_cycles(encrypt_func, &enc);
 
+    // prevent compiler from removing these values
+    asm volatile("" : : "r"(clen), "r"(ct) : "memory");
+
     printf("Encryption cycles: %lu\n", enc_cycles);
     printf("Ciphertext length: %llu bytes\n", clen);
 
     struct dec_args dec = {decrypted, &mlen, ct, clen, ad, sizeof(ad), nonce, key};
     uint64_t dec_cycles = measure_cycles(decrypt_func, &dec);
+
+    asm volatile("" : : "r"(mlen), "r"(decrypted) : "memory");
 
     printf("Decryption cycles: %lu\n", dec_cycles);
     printf("Decrypted message length: %llu bytes\n", mlen);
