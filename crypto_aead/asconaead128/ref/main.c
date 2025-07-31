@@ -11,15 +11,17 @@
 #include "api.h"
 #include "crypto_aead.h"
 
-static long perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
-                            int cpu, int group_fd, unsigned long flags) {
+// Define a constant for the number of loop iterations
+#define NUM_ITERATIONS 1000
+
+static long
+perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
+                int cpu, int group_fd, unsigned long flags) {
     return syscall(__NR_perf_event_open, hw_event, pid, cpu, group_fd, flags);
 }
 
 int main() {
-    printf("[DEBUG] Running Ascon REF benchmark on: %s\n", __FILE__);
-
-    // Setup inputs
+    // Inputs
     uint8_t key[CRYPTO_KEYBYTES] = {0};
     uint8_t nonce[CRYPTO_NPUBBYTES] = {0};
     uint8_t ad[] = "MacBook";
@@ -27,16 +29,17 @@ int main() {
     size_t msg_len = 800 * 1024;
     uint8_t *msg = malloc(msg_len);
     uint8_t *ct = malloc(msg_len + CRYPTO_ABYTES);
-    unsigned long long clen = 0;
+    uint8_t *decrypted = malloc(msg_len + CRYPTO_ABYTES);
+    unsigned long long clen = 0, mlen = 0;
 
-    if (!msg || !ct) {
+    if (!msg || !ct || !decrypted) {
         fprintf(stderr, "Memory allocation failed\n");
         return 1;
     }
 
     for (size_t i = 0; i < msg_len; i++) msg[i] = (uint8_t)(i % 256);
 
-    // Setup PMU
+    // === ENCRYPTION Measurement ===
     struct perf_event_attr pe;
     memset(&pe, 0, sizeof(struct perf_event_attr));
     pe.type = PERF_TYPE_HARDWARE;
@@ -46,56 +49,86 @@ int main() {
     pe.exclude_kernel = 1;
     pe.exclude_hv = 1;
 
-    printf("[DEBUG] Opening PMU counter...\n");
     int fd = perf_event_open(&pe, 0, 0, -1, 0);
     if (fd == -1) {
-        perror("perf_event_open");
+        perror("perf_event_open (encrypt)");
+        free(msg); free(ct); free(decrypted);
         return 1;
     }
 
-    if (ioctl(fd, PERF_EVENT_IOC_RESET, 0) == -1) {
-        perror("ioctl RESET");
-        close(fd);
-        return 1;
-    }
-    if (ioctl(fd, PERF_EVENT_IOC_ENABLE, 0) == -1) {
-        perror("ioctl ENABLE");
-        close(fd);
-        return 1;
+    ioctl(fd, PERF_EVENT_IOC_RESET, 0);
+    ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
+
+    // Loop the encryption NUM_ITERATIONS times
+    for (int i = 0; i < NUM_ITERATIONS; ++i) {
+        crypto_aead_encrypt(ct, &clen, msg, msg_len, ad, sizeof(ad), NULL, nonce, key);
     }
 
-    // === Perform encryption ===
-    printf("[DEBUG] Calling crypto_aead_encrypt()\n");
-    crypto_aead_encrypt(ct, &clen, msg, msg_len, ad, sizeof(ad), NULL, nonce, key);
-    printf("[DEBUG] Finished crypto_aead_encrypt()\n");
+    ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
 
-    if (ioctl(fd, PERF_EVENT_IOC_DISABLE, 0) == -1) {
-        perror("ioctl DISABLE");
+    uint64_t total_enc_cycles = 0;
+    if (read(fd, &total_enc_cycles, sizeof(total_enc_cycles)) != sizeof(total_enc_cycles)) {
+        perror("read (encrypt)");
         close(fd);
-        return 1;
-    }
-
-    uint64_t cycles = 0;
-    ssize_t r = read(fd, &cycles, sizeof(cycles));
-    if (r != sizeof(cycles)) {
-        perror("read");
-        fprintf(stderr, "[ERROR] read failed: got %zd bytes, errno: %d (%s)\n", r, errno, strerror(errno));
-        close(fd);
+        free(msg); free(ct); free(decrypted);
         return 1;
     }
     close(fd);
 
-    // Prevent compiler optimization
+    uint64_t avg_enc_cycles = total_enc_cycles / NUM_ITERATIONS;
+
+    // Prevent optimization
     __asm__ volatile("" : : "r"(clen), "r"(ct) : "memory");
 
-    uint32_t checksum = 0;
-    for (size_t i = 0; i < clen; i++) checksum += ct[i];
+    uint32_t ct_checksum = 0;
+    for (size_t i = 0; i < clen; i++) ct_checksum += ct[i];
 
-    printf("Ciphertext checksum: %u\n", checksum);
-    printf("Encryption cycles: %lu\n", cycles);
+    printf("Ciphertext checksum: %u\n", ct_checksum);
+    printf("Total Encryption cycles for %d iterations: %lu\n", NUM_ITERATIONS, total_enc_cycles);
+    printf("Average Encryption cycles per operation: %lu\n", avg_enc_cycles);
     printf("Ciphertext length: %llu bytes\n", clen);
+
+    // === DECRYPTION Measurement ===
+    fd = perf_event_open(&pe, 0, 0, -1, 0);
+    if (fd == -1) {
+        perror("perf_event_open (decrypt)");
+        free(msg); free(ct); free(decrypted);
+        return 1;
+    }
+
+    ioctl(fd, PERF_EVENT_IOC_RESET, 0);
+    ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
+
+    // Loop the decryption NUM_ITERATIONS times
+    for (int i = 0; i < NUM_ITERATIONS; ++i) {
+        crypto_aead_decrypt(decrypted, &mlen, NULL, ct, clen, ad, sizeof(ad), nonce, key);
+    }
+
+    ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
+
+    uint64_t total_dec_cycles = 0;
+    if (read(fd, &total_dec_cycles, sizeof(total_dec_cycles)) != sizeof(total_dec_cycles)) {
+        perror("read (decrypt)");
+        close(fd);
+        free(msg); free(ct); free(decrypted);
+        return 1;
+    }
+    close(fd);
+
+    uint64_t avg_dec_cycles = total_dec_cycles / NUM_ITERATIONS;
+
+    __asm__ volatile("" : : "r"(mlen), "r"(decrypted) : "memory");
+
+    uint32_t pt_checksum = 0;
+    for (size_t i = 0; i < mlen; i++) pt_checksum += decrypted[i];
+
+    printf("Decrypted checksum: %u\n", pt_checksum);
+    printf("Total Decryption cycles for %d iterations: %lu\n", NUM_ITERATIONS, total_dec_cycles);
+    printf("Average Decryption cycles per operation: %lu\n", avg_dec_cycles);
+    printf("Decrypted message length: %llu bytes\n", mlen);
 
     free(msg);
     free(ct);
+    free(decrypted);
     return 0;
 }
