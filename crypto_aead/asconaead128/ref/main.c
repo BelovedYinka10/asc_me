@@ -1,9 +1,9 @@
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
+#include <string.h>
+#include <stdlib.h>
 #include <sys/ioctl.h>
 #include <linux/perf_event.h>
 #include <asm/unistd.h>
@@ -18,7 +18,6 @@ perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
 }
 
 int main() {
-    // Inputs
     uint8_t key[CRYPTO_KEYBYTES] = {0};
     uint8_t nonce[CRYPTO_NPUBBYTES] = {0};
     uint8_t ad[] = "MacBook";
@@ -26,17 +25,16 @@ int main() {
     size_t msg_len = 800 * 1024;
     uint8_t *msg = malloc(msg_len);
     uint8_t *ct = malloc(msg_len + CRYPTO_ABYTES);
-    uint8_t *decrypted = malloc(msg_len + CRYPTO_ABYTES);
-    unsigned long long clen = 0, mlen = 0;
+    unsigned long long clen = 0;
 
-    if (!msg || !ct || !decrypted) {
+    if (!msg || !ct) {
         fprintf(stderr, "Memory allocation failed\n");
         return 1;
     }
 
     for (size_t i = 0; i < msg_len; i++) msg[i] = (uint8_t)(i % 256);
 
-    // === ENCRYPTION Measurement ===
+    // Setup PMU
     struct perf_event_attr pe;
     memset(&pe, 0, sizeof(struct perf_event_attr));
     pe.type = PERF_TYPE_HARDWARE;
@@ -48,68 +46,38 @@ int main() {
 
     int fd = perf_event_open(&pe, 0, 0, -1, 0);
     if (fd == -1) {
-        perror("perf_event_open (encrypt)");
+        perror("perf_event_open");
         return 1;
     }
 
+    // Start counting
     ioctl(fd, PERF_EVENT_IOC_RESET, 0);
     ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
 
+    // --- Encryption ---
     crypto_aead_encrypt(ct, &clen, msg, msg_len, ad, sizeof(ad), NULL, nonce, key);
 
+    // Stop counting
     ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
 
-    uint64_t enc_cycles = 0;
-    if (read(fd, &enc_cycles, sizeof(enc_cycles)) != sizeof(enc_cycles)) {
-        perror("read (encrypt)");
+    uint64_t cycles = 0;
+    if (read(fd, &cycles, sizeof(cycles)) != sizeof(cycles)) {
+        perror("read");
         close(fd);
         return 1;
     }
+
     close(fd);
 
-    // Prevent optimization
-    __asm__ volatile("" : : "r"(clen), "r"(ct) : "memory");
+    // Force compiler to keep ciphertext
+    uint32_t checksum = 0;
+    for (size_t i = 0; i < clen; i++) checksum += ct[i];
 
-    uint32_t ct_checksum = 0;
-    for (size_t i = 0; i < clen; i++) ct_checksum += ct[i];
-
-    printf("Ciphertext checksum: %u\n", ct_checksum);
-    printf("Encryption cycles: %lu\n", enc_cycles);
+    printf("Ciphertext checksum: %u\n", checksum);
+    printf("Encryption cycles: %lu\n", cycles);
     printf("Ciphertext length: %llu bytes\n", clen);
-
-    // === DECRYPTION Measurement ===
-    fd = perf_event_open(&pe, 0, 0, -1, 0);
-    if (fd == -1) {
-        perror("perf_event_open (decrypt)");
-        return 1;
-    }
-
-    ioctl(fd, PERF_EVENT_IOC_RESET, 0);
-    ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
-
-    crypto_aead_decrypt(decrypted, &mlen, NULL, ct, clen, ad, sizeof(ad), nonce, key);
-
-    ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
-
-    uint64_t dec_cycles = 0;
-    if (read(fd, &dec_cycles, sizeof(dec_cycles)) != sizeof(dec_cycles)) {
-        perror("read (decrypt)");
-        close(fd);
-        return 1;
-    }
-    close(fd);
-
-    __asm__ volatile("" : : "r"(mlen), "r"(decrypted) : "memory");
-
-    uint32_t pt_checksum = 0;
-    for (size_t i = 0; i < mlen; i++) pt_checksum += decrypted[i];
-
-    printf("Decrypted checksum: %u\n", pt_checksum);
-    printf("Decryption cycles: %lu\n", dec_cycles);
-    printf("Decrypted message length: %llu bytes\n", mlen);
 
     free(msg);
     free(ct);
-    free(decrypted);
     return 0;
 }
