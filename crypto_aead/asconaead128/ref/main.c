@@ -107,8 +107,8 @@ int main() {
     struct enc_args enc = {ct, &clen, msg, msg_len, ad, sizeof(ad), nonce, key};
     uint64_t enc_cycles = measure_cycles(encrypt_func, &enc);
 
-    // prevent compiler from removing these values
-    asm volatile("" : : "r"(clen), "r"(ct) : "memory");
+    // Prevent optimization from removing output
+    __asm__ volatile("" : : "r"(clen), "r"(ct) : "memory");
 
     printf("Encryption cycles: %lu\n", enc_cycles);
     printf("Ciphertext length: %llu bytes\n", clen);
@@ -116,7 +116,7 @@ int main() {
     struct dec_args dec = {decrypted, &mlen, ct, clen, ad, sizeof(ad), nonce, key};
     uint64_t dec_cycles = measure_cycles(decrypt_func, &dec);
 
-    asm volatile("" : : "r"(mlen), "r"(decrypted) : "memory");
+    __asm__ volatile("" : : "r"(mlen), "r"(decrypted) : "memory");
 
     printf("Decryption cycles: %lu\n", dec_cycles);
     printf("Decrypted message length: %llu bytes\n", mlen);
