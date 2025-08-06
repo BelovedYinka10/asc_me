@@ -16,7 +16,7 @@
 #include "api.h"
 #include "crypto_aead.h"
 
-#define NUM_ITERATIONS 1.0  // Simulating real-device behavior (1 message at a time)
+#define NUM_ITERATIONS 1000.0
 
 static long perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
                             int cpu, int group_fd, unsigned long flags) {
@@ -25,18 +25,6 @@ static long perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
 
 double time_diff_ns(struct timespec start, struct timespec end) {
     return (end.tv_sec - start.tv_sec) * 1e9 + (end.tv_nsec - start.tv_nsec);
-}
-
-void print_memory_usage(const char *label) {
-    FILE *fp = fopen("/proc/self/status", "r");
-    if (!fp) return;
-    char line[256];
-    while (fgets(line, sizeof(line), fp)) {
-        if (strncmp(line, "VmRSS:", 6) == 0 || strncmp(line, "VmSize:", 7) == 0) {
-            printf("[%s] %s", label, line);
-        }
-    }
-    fclose(fp);
 }
 
 int main() {
@@ -81,28 +69,30 @@ int main() {
     }
 
     struct timespec start_enc, end_enc;
-    struct rusage enc_usage_before, enc_usage_after;
-    getrusage(RUSAGE_SELF, &enc_usage_before);
-    print_memory_usage("Before Encryption");
+    struct rusage usage_enc_before, usage_enc_after;
 
+    getrusage(RUSAGE_SELF, &usage_enc_before);
     clock_gettime(CLOCK_MONOTONIC, &start_enc);
     ioctl(fd, PERF_EVENT_IOC_RESET, 0);
     ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
 
     unsigned long long clen = 0;
-    crypto_aead_encrypt(ct, &clen, msg, msg_len, ad, sizeof(ad), NULL, nonce, key);
+    for (int i = 0; i < (int)NUM_ITERATIONS; ++i) {
+        crypto_aead_encrypt(ct, &clen, msg, msg_len, ad, sizeof(ad), NULL, nonce, key);
+    }
 
     ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
     clock_gettime(CLOCK_MONOTONIC, &end_enc);
-    print_memory_usage("After Encryption");
-    getrusage(RUSAGE_SELF, &enc_usage_after);
+    getrusage(RUSAGE_SELF, &usage_enc_after);
 
-    uint64_t enc_cycles = 0;
-    read(fd, &enc_cycles, sizeof(enc_cycles));
+    uint64_t total_enc_cycles = 0;
+    read(fd, &total_enc_cycles, sizeof(total_enc_cycles));
     close(fd);
 
-    double enc_time_ms = time_diff_ns(start_enc, end_enc) / 1e6;
-    long enc_mem_used_kb = enc_usage_after.ru_maxrss - enc_usage_before.ru_maxrss;
+    double total_enc_time_ns = time_diff_ns(start_enc, end_enc);
+    double avg_enc_time_ms = (total_enc_time_ns / 1e6) / NUM_ITERATIONS;
+    double avg_enc_cycles = total_enc_cycles / NUM_ITERATIONS;
+    long enc_mem_kb = usage_enc_after.ru_maxrss - usage_enc_before.ru_maxrss;
 
     // === DECRYPTION ===
     fd = perf_event_open(&pe, 0, 0, -1, 0);
@@ -112,51 +102,54 @@ int main() {
     }
 
     struct timespec start_dec, end_dec;
-    struct rusage dec_usage_before, dec_usage_after;
-    getrusage(RUSAGE_SELF, &dec_usage_before);
-    print_memory_usage("Before Decryption");
+    struct rusage usage_dec_before, usage_dec_after;
 
+    getrusage(RUSAGE_SELF, &usage_dec_before);
     clock_gettime(CLOCK_MONOTONIC, &start_dec);
     ioctl(fd, PERF_EVENT_IOC_RESET, 0);
     ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
 
     unsigned long long mlen = 0;
-    crypto_aead_decrypt(decrypted, &mlen, NULL, ct, clen, ad, sizeof(ad), nonce, key);
+    for (int i = 0; i < (int)NUM_ITERATIONS; ++i) {
+        crypto_aead_decrypt(decrypted, &mlen, NULL, ct, clen, ad, sizeof(ad), nonce, key);
+    }
 
     ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
     clock_gettime(CLOCK_MONOTONIC, &end_dec);
-    print_memory_usage("After Decryption");
-    getrusage(RUSAGE_SELF, &dec_usage_after);
+    getrusage(RUSAGE_SELF, &usage_dec_after);
 
-    uint64_t dec_cycles = 0;
-    read(fd, &dec_cycles, sizeof(dec_cycles));
+    uint64_t total_dec_cycles = 0;
+    read(fd, &total_dec_cycles, sizeof(total_dec_cycles));
     close(fd);
 
-    double dec_time_ms = time_diff_ns(start_dec, end_dec) / 1e6;
-    long dec_mem_used_kb = dec_usage_after.ru_maxrss - dec_usage_before.ru_maxrss;
+    double total_dec_time_ns = time_diff_ns(start_dec, end_dec);
+    double avg_dec_time_ms = (total_dec_time_ns / 1e6) / NUM_ITERATIONS;
+    double avg_dec_cycles = total_dec_cycles / NUM_ITERATIONS;
+    long dec_mem_kb = usage_dec_after.ru_maxrss - usage_dec_before.ru_maxrss;
 
-    // === Check if decryption was successful
+    // === Check correctness
     int match = memcmp(msg, decrypted, msg_len);
     printf("\n✅ Decryption match: %s\n", (match == 0) ? "YES" : "❌ NO");
 
-    // === Output
+    // === Results
     printf("\n=== ENCRYPTION RESULTS ===\n");
-    printf("Time taken: %.3f ms\n", enc_time_ms);
-    printf("CPU cycles: %lu\n", enc_cycles);
-    printf("Memory usage delta: %ld KB\n", enc_mem_used_kb);
+    printf("Average time: %.3f ms\n", avg_enc_time_ms);
+    printf("Average cycles: %.0f\n", avg_enc_cycles);
+    printf("Memory usage change: %ld KB\n", enc_mem_kb);
     printf("Ciphertext length: %llu bytes\n", clen);
 
     printf("\n=== DECRYPTION RESULTS ===\n");
-    printf("Time taken: %.3f ms\n", dec_time_ms);
-    printf("CPU cycles: %lu\n", dec_cycles);
-    printf("Memory usage delta: %ld KB\n", dec_mem_used_kb);
+    printf("Average time: %.3f ms\n", avg_dec_time_ms);
+    printf("Average cycles: %.0f\n", avg_dec_cycles);
+    printf("Memory usage change: %ld KB\n", dec_mem_kb);
     printf("Decrypted length: %llu bytes\n", mlen);
 
-    printf("\n=== MALLOC ALLOCATIONS ===\n");
+    printf("\n=== MALLOC BUFFER ALLOCATIONS ===\n");
     printf("msg buffer       : %zu bytes\n", msg_mem);
     printf("ciphertext buffer: %zu bytes\n", ct_mem);
     printf("decrypted buffer : %zu bytes\n", dec_mem);
-    printf("Total malloc     : %.2f KB\n", (msg_mem + ct_mem + dec_mem) / 1024.0);
+    printf("Total malloc     : %.2f KB\n",
+           (msg_mem + ct_mem + dec_mem) / 1024.0);
 
     free(msg);
     free(ct);
