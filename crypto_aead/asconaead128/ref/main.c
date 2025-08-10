@@ -168,7 +168,7 @@ static void child_decrypt(int wfd, size_t msg_len){
 /* ------- parent ------- */
 
 int main(void){
-    const size_t msg_len = 800*1024; // 800 KB payload
+    const size_t msg_len = 10*1024; // 800 KB payload
 
     // Encrypt child
     int p1[2]; if(pipe(p1)!=0){ perror("pipe"); return 1; }
